@@ -9,6 +9,10 @@ Python package for building and testing Bitcoin implied volatility prediction mo
 ## Installation
 
 ```bash
+# Install from GitHub
+pip install git+https://github.com/jberros/btcvol-python.git
+
+# Or from PyPI (coming soon)
 pip install btcvol
 ```
 
@@ -16,7 +20,15 @@ pip install btcvol
 
 ```python
 from btcvol import TrackerBase, test_model_locally
+from btcvol.examples import GARCHVolatilityModel
+import numpy as np
 
+# Option 1: Use the built-in GARCH model
+model = GARCHVolatilityModel(base_vol=0.42)
+predictions = model.predict("BTC", horizon=3600, step=900)
+print(f"Generated {len(predictions)} predictions: {predictions}")
+
+# Option 2: Create your own custom model
 class MyVolatilityModel(TrackerBase):
     def predict(self, asset: str, horizon: int, step: int):
         """
@@ -31,7 +43,13 @@ class MyVolatilityModel(TrackerBase):
             List of predicted volatility values (0-1 range, e.g., 0.40 = 40%)
         """
         num_predictions = horizon // step
-        return [0.40] * num_predictions  # Simple constant volatility
+        base_vol = 0.42
+        
+        # Apply mean reversion based on horizon
+        horizon_hours = horizon / 3600
+        adjustment = 1.0 / np.sqrt(horizon_hours / 24.0)
+        
+        return [base_vol * adjustment] * num_predictions
 
 # Test your model locally
 if __name__ == "__main__":
