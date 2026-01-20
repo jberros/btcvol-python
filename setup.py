@@ -9,13 +9,13 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="btcvol",
-    version="1.0.0",
+    version="1.1.0",
     author="Jeremy Berros",
     author_email="jberrospellenc@gmail.com",
     description="Bitcoin Implied Volatility Prediction Competition - Participant Package",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/btcvol-python",
+    url="https://github.com/jberros/btcvol-python",
     packages=find_packages(include=['btcvol', 'btcvol.*']),
     classifiers=[
         "Development Status :: 4 - Beta",
@@ -41,8 +41,8 @@ setup(
     },
     keywords="bitcoin volatility prediction competition machine-learning crunchdao",
     project_urls={
-        "Bug Reports": "https://github.com/yourusername/btcvol-python/issues",
-        "Source": "https://github.com/yourusername/btcvol-python",
+        "Bug Reports": "https://github.com/jberros/btcvol-python/issues",
+        "Source": "https://github.com/jberros/btcvol-python",
         "Competition": "https://www.crunchdao.com/",
     },
 )

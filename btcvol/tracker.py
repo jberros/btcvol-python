@@ -3,8 +3,9 @@ Base class for BTC DVOL prediction models.
 """
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List, Optional, Dict, Tuple
 import pandas as pd
+from datetime import datetime
 
 
 class TrackerBase(ABC):
@@ -22,7 +23,8 @@ class TrackerBase(ABC):
     
     def __init__(self):
         """Initialize the tracker."""
-        pass
+        self._price_cache = {}
+        self._dvol_cache = {}
     
     @abstractmethod
     def predict(self, asset: str, horizon: int, step: int) -> List[float]:
@@ -48,39 +50,93 @@ class TrackerBase(ABC):
         """
         raise NotImplementedError("Subclasses must implement predict()")
     
-    def fetch_price_data(self, asset: str = "BTC", days: int = 30) -> Optional[pd.DataFrame]:
+    def fetch_price_data(
+        self, 
+        asset: str, 
+        from_timestamp: Optional[datetime] = None,
+        to_timestamp: Optional[datetime] = None
+    ) -> pd.DataFrame:
         """
-        Helper method to fetch historical price data.
+        Fetch historical price data from the competition infrastructure.
         
-        Note: This is a placeholder for local testing. In production, the competition
-        infrastructure will provide real-time price data.
+        This method is automatically called by the orchestrator during the tick() phase
+        to provide models with price history. Models can access this data for training
+        or feature engineering.
         
         Args:
-            asset: Asset symbol (default: "BTC")
-            days: Number of days of historical data to fetch
+            asset: Asset symbol (e.g., "BTC")
+            from_timestamp: Start time for historical data (optional)
+            to_timestamp: End time for historical data (optional)
             
         Returns:
             DataFrame with columns: ['timestamp', 'price']
-            Returns None if data unavailable
+            Empty DataFrame if no data available
+            
+        Note:
+            In competition environment, this data is injected via tick() calls.
+            For local testing, this returns cached data or empty DataFrame.
         """
-        # This would be implemented in the actual competition environment
-        # For local testing, participants should use public APIs
-        return None
+        if asset in self._price_cache:
+            df = self._price_cache[asset]
+            if from_timestamp and to_timestamp:
+                df = df[(df['timestamp'] >= from_timestamp) & (df['timestamp'] <= to_timestamp)]
+            return df
+        return pd.DataFrame(columns=['timestamp', 'price'])
     
-    def fetch_dvol_data(self, days: int = 30) -> Optional[pd.DataFrame]:
+    def fetch_dvol_data(
+        self,
+        asset: str,
+        from_timestamp: Optional[datetime] = None,
+        to_timestamp: Optional[datetime] = None
+    ) -> pd.DataFrame:
         """
-        Helper method to fetch historical DVOL data.
+        Fetch historical Deribit DVOL data from the competition infrastructure.
         
-        Note: This is a placeholder for local testing. Use Deribit API directly
-        for historical data during development.
+        DVOL is the 30-day implied volatility index from Deribit. This method allows
+        models to access historical DVOL values for analysis or feature engineering.
         
         Args:
-            days: Number of days of historical data to fetch
+            asset: Asset symbol (must be "BTC")
+            from_timestamp: Start time for historical data (optional)
+            to_timestamp: End time for historical data (optional)
             
         Returns:
             DataFrame with columns: ['timestamp', 'dvol']
-            Returns None if data unavailable
+            DVOL values are in decimal format (0.40 = 40% annualized volatility)
+            Empty DataFrame if no data available
+            
+        Note:
+            In competition environment, DVOL data availability may be limited.
+            For local testing, this returns cached data or empty DataFrame.
         """
-        # This would be implemented in the actual competition environment
-        # For local testing, use: https://docs.deribit.com/#public-get_volatility_index_data
-        return None
+        if asset in self._dvol_cache:
+            df = self._dvol_cache[asset]
+            if from_timestamp and to_timestamp:
+                df = df[(df['timestamp'] >= from_timestamp) & (df['timestamp'] <= to_timestamp)]
+            return df
+        return pd.DataFrame(columns=['timestamp', 'dvol'])
+    
+    def tick(self, prices: Dict[str, List[Tuple[float, float]]]):
+        """
+        Receive price updates from the orchestrator.
+        
+        This method is called by the competition infrastructure to provide models
+        with real-time price data. Models can store this data for use in predictions.
+        
+        Args:
+            prices: Dictionary mapping asset symbols to list of (timestamp, price) tuples
+                    Example: {'BTC': [(1704067200.0, 42500.50), ...]}
+        
+        Note:
+            Override this method if you need custom processing of incoming price data.
+            The default implementation stores prices in internal cache.
+        """
+        for asset, price_list in prices.items():
+            if price_list:
+                df = pd.DataFrame(price_list, columns=['timestamp', 'price'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                
+                if asset in self._price_cache:
+                    self._price_cache[asset] = pd.concat([self._price_cache[asset], df], ignore_index=True)
+                else:
+                    self._price_cache[asset] = df
