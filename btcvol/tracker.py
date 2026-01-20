@@ -21,6 +21,9 @@ class TrackerBase(ABC):
         ...         return [0.40, 0.39, 0.38, 0.37]  # Example predictions
     """
     
+    # Maximum number of rows to keep in price/DVOL cache (prevent RAM issues)
+    MAX_CACHE_ROWS = 10000
+    
     def __init__(self):
         """Initialize the tracker."""
         self._price_cache = {}
@@ -123,13 +126,17 @@ class TrackerBase(ABC):
         This method is called by the competition infrastructure to provide models
         with real-time price data. Models can store this data for use in predictions.
         
+        The cache automatically limits itself to MAX_CACHE_ROWS most recent entries
+        to prevent RAM exhaustion during long-running competitions.
+        
         Args:
             prices: Dictionary mapping asset symbols to list of (timestamp, price) tuples
                     Example: {'BTC': [(1704067200.0, 42500.50), ...]}
         
         Note:
             Override this method if you need custom processing of incoming price data.
-            The default implementation stores prices in internal cache.
+            The default implementation stores prices in internal cache with automatic
+            size limiting (keeps most recent MAX_CACHE_ROWS entries).
         """
         for asset, price_list in prices.items():
             if price_list:
@@ -137,6 +144,12 @@ class TrackerBase(ABC):
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 
                 if asset in self._price_cache:
+                    # Concatenate new data
                     self._price_cache[asset] = pd.concat([self._price_cache[asset], df], ignore_index=True)
+                    
+                    # Limit cache size to prevent RAM issues
+                    # Keep only the most recent MAX_CACHE_ROWS entries
+                    if len(self._price_cache[asset]) > self.MAX_CACHE_ROWS:
+                        self._price_cache[asset] = self._price_cache[asset].tail(self.MAX_CACHE_ROWS).reset_index(drop=True)
                 else:
                     self._price_cache[asset] = df
