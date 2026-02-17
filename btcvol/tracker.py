@@ -5,7 +5,8 @@ Base class for BTC DVOL prediction models.
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Tuple
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import requests
 
 
 class TrackerBase(ABC):
@@ -23,6 +24,10 @@ class TrackerBase(ABC):
     
     # Maximum number of rows to keep in price/DVOL cache (prevent RAM issues)
     MAX_CACHE_ROWS = 10000
+    
+    # API endpoints
+    CRUNCH_API_URL = "https://pricedb.crunchdao.com/v1/prices"
+    DERIBIT_API_URL = "https://www.deribit.com/api/v2/public/get_volatility_index_data"
     
     def __init__(self):
         """Initialize the tracker."""
@@ -60,11 +65,10 @@ class TrackerBase(ABC):
         to_timestamp: Optional[datetime] = None
     ) -> pd.DataFrame:
         """
-        Fetch historical price data from the competition infrastructure.
+        Fetch historical price data from cache or CrunchDAO API.
         
-        This method is automatically called by the orchestrator during the tick() phase
-        to provide models with price history. Models can access this data for training
-        or feature engineering.
+        This method tries cache first (populated by tick() in production),
+        then falls back to API if cache is empty or insufficient.
         
         Args:
             asset: Asset symbol (e.g., "BTC")
@@ -74,16 +78,39 @@ class TrackerBase(ABC):
         Returns:
             DataFrame with columns: ['timestamp', 'price']
             Empty DataFrame if no data available
-            
-        Note:
-            In competition environment, this data is injected via tick() calls.
-            For local testing, this returns cached data or empty DataFrame.
         """
-        if asset in self._price_cache:
-            df = self._price_cache[asset]
+        # Try cache first
+        if asset in self._price_cache and len(self._price_cache[asset]) > 50:
+            df = self._price_cache[asset].copy()
             if from_timestamp and to_timestamp:
                 df = df[(df['timestamp'] >= from_timestamp) & (df['timestamp'] <= to_timestamp)]
             return df
+        
+        # Fallback: fetch from CrunchDAO API
+        try:
+            now = datetime.now(timezone.utc)
+            from_dt = from_timestamp if from_timestamp else now - timedelta(days=30)
+            to_dt = to_timestamp if to_timestamp else now
+            
+            params = {
+                "asset": asset,
+                "from": from_dt.isoformat(),
+                "to": to_dt.isoformat()
+            }
+            
+            response = requests.get(self.CRUNCH_API_URL, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("close") and data.get("timestamp"):
+                df = pd.DataFrame({
+                    "timestamp": pd.to_datetime(data["timestamp"], unit="s"),
+                    "price": data["close"]
+                })
+                return df.sort_values("timestamp").reset_index(drop=True)
+        except Exception as e:
+            print(f"⚠ Error fetching price data from API: {e}")
+        
         return pd.DataFrame(columns=['timestamp', 'price'])
     
     def fetch_dvol_data(
@@ -93,10 +120,10 @@ class TrackerBase(ABC):
         to_timestamp: Optional[datetime] = None
     ) -> pd.DataFrame:
         """
-        Fetch historical Deribit DVOL data from the competition infrastructure.
+        Fetch historical Deribit DVOL data from cache or Deribit API.
         
-        DVOL is the 30-day implied volatility index from Deribit. This method allows
-        models to access historical DVOL values for analysis or feature engineering.
+        DVOL is the 30-day implied volatility index from Deribit. This method tries
+        cache first (populated by tick() in production), then falls back to API.
         
         Args:
             asset: Asset symbol (must be "BTC")
@@ -107,17 +134,72 @@ class TrackerBase(ABC):
             DataFrame with columns: ['timestamp', 'dvol']
             DVOL values are in decimal format (0.40 = 40% annualized volatility)
             Empty DataFrame if no data available
-            
-        Note:
-            In competition environment, DVOL data availability may be limited.
-            For local testing, this returns cached data or empty DataFrame.
         """
-        if asset in self._dvol_cache:
-            df = self._dvol_cache[asset]
+        # Try cache first
+        if asset in self._dvol_cache and len(self._dvol_cache[asset]) > 50:
+            df = self._dvol_cache[asset].copy()
             if from_timestamp and to_timestamp:
                 df = df[(df['timestamp'] >= from_timestamp) & (df['timestamp'] <= to_timestamp)]
             return df
+        
+        # Fallback: fetch from Deribit API
+        try:
+            now = datetime.now(timezone.utc)
+            start_dt = from_timestamp if from_timestamp else now - timedelta(days=2)
+            end_dt = to_timestamp if to_timestamp else now
+            
+            # Default to 15-minute resolution
+            resolution = 15
+            
+            params = {
+                "currency": asset,
+                "resolution": str(resolution),
+                "start_timestamp": int(start_dt.timestamp() * 1000),
+                "end_timestamp": int(end_dt.timestamp() * 1000)
+            }
+            
+            response = requests.get(self.DERIBIT_API_URL, params=params, timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("result", {}).get("data", [])
+            
+            rows = []
+            for item in data:
+                if isinstance(item, (list, tuple)) and len(item) >= 2:
+                    ts, val = item[0], item[1]
+                elif isinstance(item, dict):
+                    ts = item.get("timestamp") or item.get("t")
+                    val = item.get("volatility") or item.get("v") or item.get("value")
+                else:
+                    continue
+                
+                if ts is None or val is None:
+                    continue
+                
+                rows.append({
+                    "timestamp": pd.to_datetime(ts, unit="ms"),
+                    "dvol": float(val)
+                })
+            
+            if rows:
+                df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+                return df
+        except Exception as e:
+            print(f"⚠ Error fetching DVOL data from Deribit API: {e}")
+        
         return pd.DataFrame(columns=['timestamp', 'dvol'])
+    
+    def fetch_latest_dvol_data(self, step: int = 900) -> pd.DataFrame:
+        """
+        Helper method to fetch recent DVOL data at specified resolution.
+        
+        Args:
+            step: Time resolution in seconds (default: 900 = 15 minutes)
+            
+        Returns:
+            DataFrame with timestamp and dvol columns
+        """
+        return self.fetch_dvol_data("BTC")
     
     def tick(self, prices: Dict[str, List[Tuple[float, float]]]):
         """
