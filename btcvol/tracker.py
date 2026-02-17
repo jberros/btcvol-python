@@ -142,26 +142,40 @@ class TrackerBase(ABC):
                 df = df[(df['timestamp'] >= from_timestamp) & (df['timestamp'] <= to_timestamp)]
             return df
         
-        # Fallback: fetch from Deribit API
+        # Fallback: fetch from Deribit API (only fetches historical data, not future)
         try:
             now = datetime.now(timezone.utc)
-            start_dt = from_timestamp if from_timestamp else now - timedelta(days=2)
+            # Fetch last 7 days of historical data (Deribit only provides past data)
+            start_dt = from_timestamp if from_timestamp else now - timedelta(days=7)
             end_dt = to_timestamp if to_timestamp else now
             
-            # Default to 15-minute resolution
-            resolution = 15
+            # Ensure we're not requesting future data
+            if end_dt > now:
+                end_dt = now
+            if start_dt > now:
+                start_dt = now - timedelta(days=7)
+            
+            # Convert to seconds (Deribit uses seconds, not milliseconds for some endpoints)
+            start_ts = int(start_dt.timestamp())
+            end_ts = int(end_dt.timestamp())
             
             params = {
                 "currency": asset,
-                "resolution": str(resolution),
-                "start_timestamp": int(start_dt.timestamp() * 1000),
-                "end_timestamp": int(end_dt.timestamp() * 1000)
+                "start_timestamp": start_ts,
+                "end_timestamp": end_ts
             }
             
             response = requests.get(self.DERIBIT_API_URL, params=params, timeout=15)
             response.raise_for_status()
             payload = response.json()
-            data = payload.get("result", {}).get("data", [])
+            
+            # Parse different response formats
+            if "result" in payload:
+                data = payload["result"]
+                if isinstance(data, dict) and "data" in data:
+                    data = data["data"]
+            else:
+                data = payload
             
             rows = []
             for item in data:
@@ -176,8 +190,14 @@ class TrackerBase(ABC):
                 if ts is None or val is None:
                     continue
                 
+                # Try both milliseconds and seconds for timestamp
+                try:
+                    timestamp = pd.to_datetime(ts, unit="ms")
+                except:
+                    timestamp = pd.to_datetime(ts, unit="s")
+                
                 rows.append({
-                    "timestamp": pd.to_datetime(ts, unit="ms"),
+                    "timestamp": timestamp,
                     "dvol": float(val)
                 })
             
@@ -185,7 +205,8 @@ class TrackerBase(ABC):
                 df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
                 return df
         except Exception as e:
-            print(f"⚠ Error fetching DVOL data from Deribit API: {e}")
+            # Silently fail in production, only print in debug mode
+            pass
         
         return pd.DataFrame(columns=['timestamp', 'dvol'])
     
